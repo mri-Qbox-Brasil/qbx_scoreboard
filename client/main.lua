@@ -1,65 +1,61 @@
 local config = require 'config.client'
-local sharedConfig = require 'config.shared'
-local scoreboardOpen = false
-local playerOptin = {}
+local isScoreboardOpen, onDutyAdmins
 
-local function shouldShowPlayerId(isTargetAdmin)
-    local isClientAdmin = playerOptin[cache.serverId].isOnDutyAdmin
+local function shouldShowPlayerId(targetServerId)
     if config.idVisibility == 'all' then return true end
-    if isClientAdmin then return true end
+    if onDutyAdmins[cache.serverId] then return true end
     if config.idVisibility == 'admin_only' then return false end
-    if config.idVisibility == 'admin_excluded' and isTargetAdmin then return false end
+    if config.idVisibility == 'admin_excluded' and onDutyAdmins[targetServerId] then return false end
     return true
 end
 
 local function drawPlayerNumbers()
     CreateThread(function()
-        while scoreboardOpen do
+        while isScoreboardOpen do
             local players = cache('nearbyPlayers', function()
-                return lib.getNearbyPlayers(GetEntityCoords(cache.ped), 10, true)
+                local p = lib.getNearbyPlayers(GetEntityCoords(cache.ped), config.visibilityDistance, true)
+
+                for i = #p, 1, -1 do
+                    p[i].serverId = GetPlayerServerId(p[i].id)
+
+                    if not shouldShowPlayerId(p[i].serverId) then
+                        p[i] = p[#p]
+                        p[#p] = nil
+                    end
+                end
+
+                return p
             end, 1000)
+
             for i = 1, #players do
                 local player = players[i]
-                local serverId = GetPlayerServerId(player.id)
-                if shouldShowPlayerId(playerOptin[serverId].isOnDutyAdmin) then
-                    qbx.drawText3d({
-                        text = '['..serverId..']',
-                        coords = vec3(player.coords.x, player.coords.y, player.coords.z + 1.0),
-                    })
-                end
+                local pedCoords = GetEntityCoords(player.ped)
+                qbx.drawText3d({
+                    text = '['..player.serverId..']',
+                    coords = vec3(pedCoords.x, pedCoords.y, pedCoords.z + 1.0),
+                })
             end
             Wait(0)
         end
     end)
 end
 
--- Events
-
-RegisterNetEvent('QBCore:Client:OnPlayerLoaded', function()
-    sharedConfig.illegalActions = lib.callback.await('qbx_scoreboard:server:getConfig')
-end)
-
-RegisterNetEvent('qb-scoreboard:client:SetActivityBusy', function(activity, busy)
-    sharedConfig.illegalActions[activity].busy = busy
-end)
-
 -- Command
 
 local function openScoreboard()
-    lib.callback('qbx_scoreboard:server:getScoreboardData', false, function(players, cops, playerList)
-        playerOptin = playerList
+    local players, cops, admins = lib.callback.await('qbx_scoreboard:server:getScoreboardData')
+    onDutyAdmins = admins
 
-        SendNUIMessage({
-            action = 'open',
-            players = players,
-            maxPlayers = config.maxPlayers,
-            requiredCops = sharedConfig.illegalActions,
-            currentCops = cops
-        })
+    SendNUIMessage({
+        action = 'open',
+        players = players,
+        maxPlayers = config.maxPlayers,
+        requiredCops = GlobalState.illegalActions,
+        currentCops = cops
+    })
 
-        scoreboardOpen = true
-        drawPlayerNumbers()
-    end)
+    isScoreboardOpen = true
+    drawPlayerNumbers()
 end
 
 local function closeScoreboard()
@@ -67,7 +63,7 @@ local function closeScoreboard()
         action = 'close',
     })
 
-    scoreboardOpen = false
+    isScoreboardOpen = false
 end
 
 if config.toggle then
@@ -76,9 +72,11 @@ if config.toggle then
         description = 'Open Scoreboard',
         defaultKey = config.openKey,
         onPressed = function()
-            scoreboardOpen = not scoreboardOpen
-            if scoreboardOpen then openScoreboard() end
-            closeScoreboard()
+            if isScoreboardOpen then
+                closeScoreboard()
+            else
+                openScoreboard()
+            end
         end,
     })
 else
@@ -96,7 +94,7 @@ end
 CreateThread(function()
     Wait(1000)
     local actions = {}
-    for k, v in pairs(sharedConfig.illegalActions) do
+    for k, v in pairs(GlobalState.illegalActions) do
         actions[k] = v.label
     end
     SendNUIMessage({
